@@ -9,9 +9,22 @@ from PIL import Image
 import json
 from pathlib import Path
 import sys
+import os
+import requests
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+# API Configuration
+API_URL = os.getenv("API_URL", "http://localhost:8000")
+API_AVAILABLE = False
+
+# Check if API is available
+try:
+    response = requests.get(f"{API_URL}/health", timeout=2)
+    API_AVAILABLE = response.status_code == 200
+except:
+    API_AVAILABLE = False
 
 st.set_page_config(
     page_title="Tumor Size Analyzer",
@@ -29,6 +42,34 @@ st.markdown("""
 - Bounding box detection
 - Clinical recommendations
 """)
+
+# Show API status
+if API_AVAILABLE:
+    st.success("✅ Connected to FastAPI backend - Using real model predictions")
+else:
+    st.warning("⚠️ FastAPI backend unavailable - Using demo predictions")
+
+# Function to call FastAPI backend
+def predict_with_api(t2_array, adc_array, dwi_array):
+    """Send images to FastAPI for real prediction"""
+    try:
+        # Prepare image data as bytes
+        files = {
+            'files': [
+                ('t2', ('t2.png', Image.fromarray(t2_array), 'image/png')),
+                ('adc', ('adc.png', Image.fromarray(adc_array), 'image/png')),
+                ('dwi', ('dwi.png', Image.fromarray(dwi_array), 'image/png'))
+            ]
+        }
+        response = requests.post(f"{API_URL}/predict", files=files, timeout=30)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            st.error(f"API Error: {response.status_code}")
+            return None
+    except Exception as e:
+        st.error(f"Connection error: {str(e)}")
+        return None
 
 # Sidebar MENU with attractive styling
 st.sidebar.markdown("<h1 style='text-align: center; color: #FF6B6B; font-size: 28px;'>NAVIGATOR</h1>", unsafe_allow_html=True)
