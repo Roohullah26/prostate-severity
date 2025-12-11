@@ -1,0 +1,17 @@
+﻿fastapi
+uvicorn[standard]
+pydicom
+numpy
+opencv-python-headless
+matplotlib
+torch
+torchvision
+scikit-learn
+pillow
+ultralytics
+streamlit
+pillow
+requests
+pandas
+tqdm
+python-multipart

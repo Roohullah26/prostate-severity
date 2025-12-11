@@ -1,0 +1,69 @@
+{
+  "metadata": {
+    "timestamp": "2025-12-04T18:43:05.702395",
+    "sample_id": "demo_001",
+    "model": "baseline_real_t2_adc_3s_ep1",
+    "device": "cpu"
+  },
+  "mri_sequences": {
+    "T2": {
+      "present": true,
+      "role": "Anatomical reference"
+    },
+    "ADC": {
+      "present": true,
+      "role": "Diffusion-weighted"
+    },
+    "DWI": {
+      "present": true,
+      "role": "Diffusion-weighted"
+    }
+  },
+  "predictions": {
+    "tumor_size_mm": {
+      "width": 20.15585708618164,
+      "height": 19.975994110107422,
+      "depth": 20.024267196655273,
+      "max_dimension": 20.15585708618164
+    },
+    "confidence": 0.4995359778404236
+  },
+  "severity": {
+    "tnm_stage": "T4",
+    "stage_probabilities": {
+      "T1": 0.2018151432275772,
+      "T2": 0.2896326780319214,
+      "T3": 0.21151095628738403,
+      "T4": 0.2970411777496338
+    },
+    "clinical_notes": "Very large tumor, extensive disease. High risk for spread. Poor prognosis without treatment.",
+    "recommendations": "Urgent intervention required. Multidisciplinary team consultation. Consider systemic therapy."
+  },
+  "bounding_boxes": {
+    "rectangular": {
+      "type": "rect",
+      "x1": 102,
+      "y1": 102,
+      "x2": 122,
+      "y2": 122,
+      "center": [
+        112,
+        112
+      ],
+      "dimensions": {
+        "width_px": 20,
+        "height_px": 20
+      }
+    },
+    "circular": {
+      "type": "circle",
+      "center": [
+        112,
+        112
+      ],
+      "radius_px": 10,
+      "radius_mm": 10.07792854309082,
+      "diameter_mm": 20.15585708618164
+    }
+  }
+}
