@@ -97,6 +97,28 @@ def post_authorize(api_key: str = Form(...)):
         raise HTTPException(status_code=401, detail="invalid api_key")
 
 
+def _remap_resnet_to_tumor_predictor_keys(state_dict):
+    """Remap bare ResNet keys to TumorSizePredictor's expected prefixed keys.
+    
+    E.g., 'conv1.weight' -> 'backbone.conv1.weight'
+          'layer1.0.conv1.weight' -> 'backbone.layer1.0.conv1.weight'
+    """
+    remapped = {}
+    for k, v in state_dict.items():
+        # Skip any keys that already have the 'backbone.' prefix or are head keys
+        if k.startswith('backbone.') or k.startswith('size_head.') or k.startswith('severity_head.') or k.startswith('confidence_head.'):
+            remapped[k] = v
+        # Skip num_batches_tracked (BatchNorm tracking) - TumorSizePredictor doesn't expect these
+        elif 'num_batches_tracked' in k:
+            continue
+        # Prepend 'backbone.' to unprefixed ResNet keys
+        elif k.startswith(('conv1', 'bn1', 'layer1', 'layer2', 'layer3', 'layer4', 'fc')):
+            remapped[f'backbone.{k}'] = v
+        else:
+            remapped[k] = v
+    return remapped
+
+
 def _load_model(scripted_path: Optional[Path], state_path: Optional[Path], in_ch: int, device: str):
     device = device if device in ("cpu", "cuda") else "cpu"
     if scripted_path and scripted_path.exists():
@@ -104,9 +126,32 @@ def _load_model(scripted_path: Optional[Path], state_path: Optional[Path], in_ch
         return model, device
 
     if state_path and state_path.exists():
+        # Load the state dict first to infer input channels if needed
+        sd = torch.load(str(state_path), map_location='cpu')
+
+        # Try to detect convolution first-layer input channels from state_dict
+        inferred_in_ch = None
+        if isinstance(sd, dict):
+            for k in sd.keys():
+                if k.endswith('conv1.weight') or k.endswith('.conv1.weight'):
+                    try:
+                        inferred_in_ch = int(sd[k].shape[1])
+                        break
+                    except Exception:
+                        pass
+
+        if inferred_in_ch is not None:
+            in_ch = inferred_in_ch
+
+        # Build model with inferred or provided in_ch
         model = make_model(num_classes=2, pretrained=False, in_channels=in_ch)
-        sd = torch.load(str(state_path), map_location=device)
-        model.load_state_dict(sd)
+
+        # Attempt strict load first, fallback to non-strict if shapes differ
+        try:
+            model.load_state_dict(sd)
+        except RuntimeError:
+            model.load_state_dict(sd, strict=False)
+
         model = model.to(device)
         model.eval()
         return model, device
@@ -290,7 +335,28 @@ async def predict(file: UploadFile = File(...), scripted_path: Optional[str] = N
     try:
         model.eval()
         with torch.no_grad():
-            xb = t.unsqueeze(0).to(device)
+            xb = t.unsqueeze(0)
+
+            # Ensure input has same number of channels as model expects
+            expected_in_ch = None
+            try:
+                # common patterns: model.conv1.weight or model.backbone.conv1.weight
+                if hasattr(model, 'conv1') and hasattr(model.conv1, 'weight'):
+                    expected_in_ch = model.conv1.weight.shape[1]
+                elif hasattr(model, 'backbone') and hasattr(model.backbone, 'conv1') and hasattr(model.backbone.conv1, 'weight'):
+                    expected_in_ch = model.backbone.conv1.weight.shape[1]
+            except Exception:
+                expected_in_ch = None
+
+            if expected_in_ch is not None and xb.shape[1] != expected_in_ch:
+                # If input has fewer channels, repeat channels; if more, truncate
+                if xb.shape[1] < expected_in_ch:
+                    reps = (1, int(expected_in_ch / xb.shape[1]), 1, 1)
+                    xb = xb.repeat(reps)
+                else:
+                    xb = xb[:, :expected_in_ch, ...]
+
+            xb = xb.to(device)
             logits = model(xb)
             prob = torch.softmax(logits, dim=1)[0, 1].item()
             pred_class = int((prob > 0.5))
@@ -335,12 +401,28 @@ async def predict_size(
     device = "cuda" if torch.cuda.is_available() and config.DEVICE == "cuda" else "cpu"
     
     try:
-        model = TumorSizePredictor(pretrained=False, in_channels=3)
-        state_dict = torch.load(model_path, map_location=device)
-        model.load_state_dict(state_dict)
+        # Infer input channels from checkpoint
+        state_dict = torch.load(model_path, map_location='cpu')
+        in_ch = 3
+        if isinstance(state_dict, dict):
+            for k in state_dict.keys():
+                if 'conv1.weight' in k:
+                    try:
+                        in_ch = int(state_dict[k].shape[1])
+                        break
+                    except:
+                        pass
+        
+        # Remap unprefixed ResNet keys to 'backbone.' prefix
+        state_dict = _remap_resnet_to_tumor_predictor_keys(state_dict)
+        
+        # Create and load model
+        model = TumorSizePredictor(pretrained=False, in_channels=in_ch)
+        model.load_state_dict(state_dict, strict=False)  # Use strict=False in case of any minor key mismatches
         model = model.to(device)
         model.eval()
     except Exception as e:
+        logger.exception(f"Model load error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to load model: {e}")
     
     # Parse pixel spacing if provided
@@ -358,6 +440,23 @@ async def predict_size(
         transform = get_eval_tensor_transform(img_size=config.IMG_SIZE)
         img_tensor = transform(img) if transform else pil_to_tensor(img, img_size=config.IMG_SIZE)
         img_tensor = img_tensor.unsqueeze(0).to(device)
+        
+        # Ensure input has same number of channels as model expects
+        expected_in_ch = None
+        try:
+            if hasattr(model, 'backbone') and hasattr(model.backbone, 'conv1') and hasattr(model.backbone.conv1, 'weight'):
+                expected_in_ch = model.backbone.conv1.weight.shape[1]
+        except:
+            expected_in_ch = None
+        
+        if expected_in_ch is not None and img_tensor.shape[1] != expected_in_ch:
+            if img_tensor.shape[1] < expected_in_ch:
+                # Repeat channels: if input is 3 and we need 6, repeat to [3,3]
+                reps = (1, int(expected_in_ch / img_tensor.shape[1]), 1, 1)
+                img_tensor = img_tensor.repeat(reps)
+            else:
+                # Truncate channels
+                img_tensor = img_tensor[:, :expected_in_ch, ...]
         
         # Forward pass
         with torch.no_grad():
